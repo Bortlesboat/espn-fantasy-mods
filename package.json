@@ -1,0 +1,8 @@
+{
+  "name": "espn-fantasy-mods",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Userscripts that fix things ESPN Fantasy Football gets wrong",
+  "scripts": { "test": "node test/core.test.js", "build": "node build.js" },
+  "license": "MIT"
+}
