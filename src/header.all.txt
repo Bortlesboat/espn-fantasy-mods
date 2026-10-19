@@ -1,0 +1,14 @@
+// ==UserScript==
+// @name         ESPN Fantasy Mods
+// @namespace    https://github.com/Bortlesboat/espn-fantasy-mods
+// @version      0.2.0
+// @description  Fixes and quality-of-life mods for ESPN Fantasy Football: corrected Chance to Win, scoreboard odds, optimal lineup on box scores, all-play/luck standings, Boris Chen tier badges, hide chat bar. Toggle each from the Tampermonkey menu.
+// @author       Bortlesboat
+// @match        https://fantasy.espn.com/football/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
+// @connect      s3-us-west-1.amazonaws.com
+// @run-at       document-idle
+// @downloadURL  https://raw.githubusercontent.com/Bortlesboat/espn-fantasy-mods/master/dist/espn-fantasy-mods.user.js
+// @updateURL    https://raw.githubusercontent.com/Bortlesboat/espn-fantasy-mods/master/dist/espn-fantasy-mods.user.js
+// ==/UserScript==

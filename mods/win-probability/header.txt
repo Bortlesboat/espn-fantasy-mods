@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         ESPN Fantasy — Fixed Chance to Win
 // @namespace    https://github.com/Bortlesboat/espn-fantasy-mods
-// @version      0.1.0
-// @description  Replaces ESPN fantasy football's miscalibrated "Chance to Win" with a correctly computed one (root-sum-square player spreads, sqrt time scaling).
+// @version      0.2.0
+// @description  Replaces ESPN fantasy football's miscalibrated "Chance to Win" with a correctly computed one (root-sum-square player spreads, sqrt time scaling). Also adds corrected odds to the League Scoreboard.
 // @author       Bortlesboat
 // @match        https://fantasy.espn.com/football/*
 // @grant        none
 // @run-at       document-idle
+// @downloadURL  https://raw.githubusercontent.com/Bortlesboat/espn-fantasy-mods/master/dist/win-probability.user.js
+// @updateURL    https://raw.githubusercontent.com/Bortlesboat/espn-fantasy-mods/master/dist/win-probability.user.js
 // ==/UserScript==

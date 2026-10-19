@@ -1,13 +1,107 @@
 // ==UserScript==
 // @name         ESPN Fantasy — Fixed Chance to Win
 // @namespace    https://github.com/Bortlesboat/espn-fantasy-mods
-// @version      0.1.0
-// @description  Replaces ESPN fantasy football's miscalibrated "Chance to Win" with a correctly computed one (root-sum-square player spreads, sqrt time scaling).
+// @version      0.2.0
+// @description  Replaces ESPN fantasy football's miscalibrated "Chance to Win" with a correctly computed one (root-sum-square player spreads, sqrt time scaling). Also adds corrected odds to the League Scoreboard.
 // @author       Bortlesboat
 // @match        https://fantasy.espn.com/football/*
 // @grant        none
 // @run-at       document-idle
+// @downloadURL  https://raw.githubusercontent.com/Bortlesboat/espn-fantasy-mods/master/dist/win-probability.user.js
+// @updateURL    https://raw.githubusercontent.com/Bortlesboat/espn-fantasy-mods/master/dist/win-probability.user.js
 // ==/UserScript==
+
+/* Shared runtime for all mods: settings, ESPN data layer, DOM helpers. */
+(function (root) {
+  'use strict';
+  if (root.EspnMods) return;
+  const API = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons';
+  const GAMES = 'https://site.api.espn.com/apis/fantasy/v2/games/ffl/games';
+  const LOG = '[espn-mods]';
+  const SETTINGS_KEY = 'espnmods.settings';
+
+  // ---- settings (per-mod on/off), persisted in localStorage, toggled via Tampermonkey menu
+  const defaults = {};
+  function settings() { try { return Object.assign({}, defaults, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch (e) { return Object.assign({}, defaults); } }
+  function setSetting(k, v) { const s = settings(); s[k] = v; localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+  function enabled(mod) { return settings()[mod] !== false; }
+  function registerMod(mod, label, defaultOn) {
+    defaults[mod] = defaultOn !== false;
+    if (typeof GM_registerMenuCommand === 'function') {
+      GM_registerMenuCommand(`${enabled(mod) ? '✓' : '✗'} ${label}`, () => { setSetting(mod, !enabled(mod)); location.reload(); });
+    }
+  }
+
+  // ---- URL helpers
+  const q = name => new URL(location.href).searchParams.get(name);
+  const page = () => (location.pathname.match(/\/football\/(?:league\/)?([a-z]+)/) || [])[1] || '';
+
+  // ---- data layer: league JSON + NFL games JSON, cached, shared by all mods
+  const cache = {};
+  const listeners = [];
+  let liveTimer = null;
+
+  function weekDates() {
+    const d = new Date(); const back = (d.getDay() + 5) % 7; // days since Tuesday
+    const start = new Date(d); start.setDate(d.getDate() - back);
+    const end = new Date(start); end.setDate(start.getDate() + 7);
+    const fmt = x => x.toISOString().slice(0, 10).replace(/-/g, '');
+    return fmt(start) + '-' + fmt(end);
+  }
+
+  async function fetchLeague(scoringPeriodId) {
+    const leagueId = q('leagueId'); if (!leagueId) return null;
+    const season = q('seasonId') || new Date().getFullYear();
+    const sp = scoringPeriodId ? `scoringPeriodId=${scoringPeriodId}&` : '';
+    const r = await fetch(`${API}/${season}/segments/0/leagues/${leagueId}?${sp}view=mMatchupScore&view=mBoxscore&view=mRoster&view=mSettings&view=mStatus&view=mTeam`, { credentials: 'include' });
+    if (!r.ok) throw new Error('league fetch ' + r.status);
+    return r.json();
+  }
+  async function fetchGames() {
+    const r = await fetch(`${GAMES}?useMap=true&dates=${weekDates()}&pbpOnly=true`); // public endpoint; wildcard CORS => no credentials
+    if (!r.ok) throw new Error('games fetch ' + r.status);
+    return r.json();
+  }
+
+  async function load(opts) {
+    opts = opts || {};
+    const key = String(opts.scoringPeriodId || 'current');
+    const now = Date.now();
+    if (!opts.force && cache[key] && cache[key].data && now - cache[key].at < 30 * 1000) return cache[key].data;
+    if (cache[key] && cache[key].inflight) return cache[key].inflight;
+    const p = (async () => {
+      const [league, games] = await Promise.all([fetchLeague(opts.scoringPeriodId), fetchGames()]);
+      const data = { league, games, at: now };
+      cache[key] = { at: now, data };
+      listeners.forEach(fn => { try { fn(data, key); } catch (e) { console.warn(LOG, e); } });
+      return data;
+    })();
+    cache[key] = Object.assign(cache[key] || {}, { inflight: p });
+    try { return await p; } finally { if (cache[key]) delete cache[key].inflight; }
+  }
+
+  function anyLive(games) { return ((games && games.events) || []).some(e => e.fullStatus && e.fullStatus.type && e.fullStatus.type.state === 'in'); }
+  function startAutoRefresh(opts) {
+    if (liveTimer) return;
+    liveTimer = setInterval(async () => {
+      const key = String((opts && opts.scoringPeriodId) || 'current');
+      const c = cache[key]; const live = c && c.data && anyLive(c.data.games);
+      if (!c || live || Date.now() - c.at > 5 * 60 * 1000) { try { await load(Object.assign({ force: true }, opts)); } catch (e) { console.warn(LOG, e); } }
+    }, 60 * 1000);
+  }
+
+  // ---- misc helpers
+  const names = league => { const n = {}; for (const t of (league && league.teams) || []) n[t.id] = t.name || ((t.location || '') + ' ' + (t.nickname || '')).trim(); return n; };
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  function observe(fn) { const mo = new MutationObserver(() => fn()); mo.observe(document.documentElement, { childList: true, subtree: true }); return mo; }
+  function onUrlChange(fn) { let last = location.href; setInterval(() => { if (location.href !== last) { last = location.href; fn(); } }, 1000); }
+  function css(text) { const s = document.createElement('style'); s.textContent = text; document.documentElement.appendChild(s); }
+  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  // player rows across ESPN tables: headshot img carries the ESPN player id
+  function playerIdFromRow(row) { const img = row.querySelector('img[src*="/headshots/nfl/players/full/"]'); const m = img && img.src.match(/players\/full\/(\d+)\.png/); return m ? +m[1] : null; }
+
+  root.EspnMods = { LOG, q, page, load, startAutoRefresh, onData: fn => listeners.push(fn), names, norm, observe, onUrlChange, css, el, playerIdFromRow, settings, setSetting, enabled, registerMod, anyLive };
+})(typeof window !== 'undefined' ? window : globalThis);
 
 /* ESPN fantasy football win probability — faithful replication of ESPN's
  * client-side formula plus a corrected version.
@@ -133,53 +227,29 @@
   return { phi, compute, teamNames, fractionRemaining, starterSlots };
 }));
 
-/* Page glue for fantasy.espn.com: fetch the same data the page uses,
- * recompute win probability, and rewrite the "Chance to Win" tracker. */
+/* win-probability: rewrite "Chance to Win" trackers (FantasyCast) and add corrected odds to the Scoreboard. */
 (function () {
   'use strict';
-  const core = (typeof EspnWinProb !== 'undefined') ? EspnWinProb : require('./core.js');
+  const M = EspnMods, core = EspnWinProb;
+  M.registerMod('winprob', 'Corrected win probability');
+  if (!M.enabled('winprob')) return;
   const K = (typeof ESPN_WINPROB_K !== 'undefined') ? ESPN_WINPROB_K : 1.0;
-  const API = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons';
-  const GAMES = 'https://site.api.espn.com/apis/fantasy/v2/games/ffl/games';
-  const LOG = '[espn-winprob]';
-  let league = null, games = null, results = null, names = {};
+  let results = null, names = {};
+  const pct = p => Math.round(p * 100);
 
-  function q(name) { return new URL(location.href).searchParams.get(name); }
+  M.css(`.espnmods-odds{list-style:none;font-size:11px;color:#6c6d6f;padding:2px 0 4px}.espnmods-odds b{color:#1a1a1a}.espnmods-sigma{font-size:10px;color:#6c6d6f;text-align:center;margin-top:2px}.winprob-badge{font-size:10px;opacity:.7;cursor:help}`);
 
-  function weekDates() {
-    // ESPN requests Thu..Tue around the current NFL week; a Tue..Tue window covers it.
-    const d = new Date(); const day = d.getDay(); // 0=Sun
-    const back = (day + 5) % 7; // days since Tuesday
-    const start = new Date(d); start.setDate(d.getDate() - back);
-    const end = new Date(start); end.setDate(start.getDate() + 7);
-    const fmt = x => x.toISOString().slice(0, 10).replace(/-/g, '');
-    return fmt(start) + '-' + fmt(end);
+  function recompute(data) {
+    names = M.names(data.league);
+    results = core.compute(data.league, data.games, { k: K });
+    patchAll();
   }
 
-  async function refresh() {
-    const leagueId = q('leagueId'); if (!leagueId) return;
-    const season = q('seasonId') || new Date().getFullYear();
-    try {
-      const lr = await fetch(`${API}/${season}/segments/0/leagues/${leagueId}?view=mMatchupScore&view=mBoxscore&view=mRoster&view=mSettings&view=mStatus&view=mTeam`, { credentials: 'include' });
-      league = await lr.json();
-      const gr = await fetch(`${GAMES}?useMap=true&dates=${weekDates()}&pbpOnly=true`); // public, wildcard CORS: no credentials
-      games = await gr.json();
-      names = core.teamNames(league);
-      results = core.compute(league, games, { k: K });
-      console.log(LOG, 'computed', results.map(r => `${names[r.homeTeamId]} ${Math.round(r.fixed*100)}% (espn ${Math.round(r.espn*100)}%) vs ${names[r.awayTeamId]}`));
-      patchAll();
-    } catch (e) { console.warn(LOG, 'refresh failed', e); }
-  }
-
-  const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-
-  // Find which matchup a tracker belongs to by looking for two team names in its ancestors.
-  function matchupFor(tracker) {
-    if (!results) return null;
-    const entries = Object.entries(names).map(([id, n]) => [+id, norm(n)]).filter(e => e[1]);
+  function matchupForTracker(tracker) {
+    const entries = Object.entries(names).map(([id, n]) => [+id, M.norm(n)]).filter(e => e[1]);
     let el = tracker;
     for (let depth = 0; depth < 12 && el; depth++, el = el.parentElement) {
-      const text = norm(el.innerText);
+      const text = M.norm(el.innerText);
       const found = [];
       for (const [id, n] of entries) { const i = text.indexOf(n); if (i >= 0) found.push([i, id]); }
       const ids = [...new Set(found.sort((a, b) => a[0] - b[0]).map(f => f[1]))];
@@ -188,22 +258,18 @@
         if (r) return { r, leftIsHome: ids.indexOf(r.homeTeamId) < ids.indexOf(r.awayTeamId) };
       }
     }
-    // fallback: single matchup page with ?teamId=
-    const tid = +q('teamId');
+    const tid = +M.q('teamId');
     const r = results.find(r => r.homeTeamId === tid || r.awayTeamId === tid);
-    return r ? { r, leftIsHome: false } : null; // ESPN boxscore shows away on the left
+    return r ? { r, leftIsHome: false } : null;
   }
 
-  function patch(tracker) {
-    const m = matchupFor(tracker); if (!m) return;
+  function patchTracker(tracker) {
+    const m = matchupForTracker(tracker); if (!m) return;
     const { r, leftIsHome } = m;
-    const leftFixed = leftIsHome ? r.fixed : 1 - r.fixed;
-    const leftEspn = leftIsHome ? r.espn : 1 - r.espn;
-    const L = Math.round(leftFixed * 100), Rr = 100 - L;
-    const eL = Math.floor(leftEspn * 100), eR = 100 - eL;
-    const pcts = tracker.querySelectorAll('.totalPerc');
-    if (pcts.length !== 2) return;
-    const key = `${L}|${Rr}`;
+    const L = pct(leftIsHome ? r.fixed : 1 - r.fixed), Rr = 100 - L;
+    const eL = Math.floor((leftIsHome ? r.espn : 1 - r.espn) * 100), eR = 100 - eL;
+    const pcts = tracker.querySelectorAll('.totalPerc'); if (pcts.length !== 2) return;
+    const key = `${L}|${Rr}|${r.sigmaFixed.toFixed(1)}`;
     if (tracker.dataset.winprobKey === key) return;
     tracker.dataset.winprobKey = key;
     pcts[0].textContent = `${L}%`; pcts[1].textContent = `${Rr}%`;
@@ -213,19 +279,40 @@
     if (bars[1]) bars[1].style.width = Rr + '%';
     const label = tracker.querySelector('.trackerLabel, .header');
     if (label && !label.querySelector('.winprob-badge')) {
-      const b = document.createElement('span'); b.className = 'winprob-badge';
-      b.textContent = ' (fixed)'; b.title = `Recomputed with root-sum-square spreads; ESPN: ${eL}%–${eR}%`;
-      b.style.cssText = 'font-size:10px;opacity:.7;cursor:help';
+      const b = M.el('span', 'winprob-badge', ' (fixed)');
+      b.title = 'Recomputed with root-sum-square player spreads and sqrt time scaling. Hover the numbers for ESPN\'s original.';
       label.appendChild(b);
     }
+    let sig = tracker.querySelector('.espnmods-sigma');
+    if (!sig) { sig = M.el('div', 'espnmods-sigma'); tracker.appendChild(sig); }
+    const lm = leftIsHome ? r.homeMean : r.awayMean, rm = leftIsHome ? r.awayMean : r.homeMean;
+    sig.textContent = `proj ${lm.toFixed(1)} vs ${rm.toFixed(1)} · spread σ ${r.sigmaFixed.toFixed(1)} (ESPN used ${r.sigmaEspn.toFixed(1)})`;
   }
 
-  function patchAll() { document.querySelectorAll('.chanceToWinTracker').forEach(patch); }
+  // League Scoreboard: one line of corrected odds under every matchup
+  function patchScoreboard() {
+    document.querySelectorAll('ul.ScoreboardScoreCell__Competitors').forEach(ul => {
+      const ids = Array.from(ul.querySelectorAll('li a[href*="teamId="]')).map(a => +(a.href.match(/teamId=(\d+)/) || [])[1]).filter(Boolean);
+      const uniq = [...new Set(ids)]; if (uniq.length < 2) return;
+      const r = results.find(r => uniq.includes(r.homeTeamId) && uniq.includes(r.awayTeamId)); if (!r) return;
+      const topIsHome = uniq[0] === r.homeTeamId;
+      const top = pct(topIsHome ? r.fixed : 1 - r.fixed), bot = 100 - top;
+      const eTop = Math.floor((topIsHome ? r.espn : 1 - r.espn) * 100);
+      const key = `${top}|${eTop}`;
+      let li = ul.querySelector('.espnmods-odds');
+      if (!li) { li = M.el('li', 'espnmods-odds'); ul.appendChild(li); }
+      if (li.dataset.key === key) return; li.dataset.key = key;
+      li.innerHTML = ''; li.append('Win odds: '); li.appendChild(M.el('b', '', `${top}% – ${bot}%`)); li.append(`  (ESPN ${eTop}–${100 - eTop})`);
+      li.title = `Corrected chance to win, top team first. σ ${r.sigmaFixed.toFixed(1)} vs ESPN's ${r.sigmaEspn.toFixed(1)}`;
+    });
+  }
 
-  new MutationObserver(() => { if (results) patchAll(); }).observe(document.documentElement, { childList: true, subtree: true });
-  refresh();
-  setInterval(refresh, 60 * 1000);
-  let lastUrl = location.href;
-  setInterval(() => { if (location.href !== lastUrl) { lastUrl = location.href; refresh(); } }, 1000);
-  if (typeof window !== 'undefined') window.__espnWinProb = { refresh, get results() { return results; }, get names() { return names; } };
+  function patchAll() { if (!results) return; document.querySelectorAll('.chanceToWinTracker').forEach(patchTracker); patchScoreboard(); }
+
+  M.onData(recompute);
+  M.observe(patchAll);
+  M.onUrlChange(() => M.load({ force: true }).catch(e => console.warn(M.LOG, e)));
+  M.load().catch(e => console.warn(M.LOG, 'winprob load failed', e));
+  M.startAutoRefresh();
+  window.__espnWinProb = { get results() { return results; }, get names() { return names; }, refresh: () => M.load({ force: true }) };
 })();
